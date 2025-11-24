@@ -8,6 +8,24 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Function to escape SSID for safe usage in commands
+escape_ssid() {
+    local ssid="$1"
+    # Escape special characters that could cause issues in commands and regex
+    printf '%s' "$ssid" | sed 's/[[\.*^$()+?{|\\]/\\&/g'
+}
+
+# Function to safely quote arguments for nmcli
+quote_for_nmcli() {
+    local arg="$1"
+    # If the argument contains spaces, special characters, or quotes, wrap it in quotes
+    if [[ "$arg" =~ [[:space:]\"\'\\] ]]; then
+        printf '"%s"' "${arg//\"/\\\"}"
+    else
+        printf '%s' "$arg"
+    fi
+}
+
 # Function to display header
 show_header() {
     clear
@@ -42,19 +60,24 @@ show_available_networks() {
 
 # Function to get available networks as array
 get_networks_array() {
-    nmcli -t -f SSID device wifi list | grep -v "^$" | sort -u
+    # Use a more robust method to handle SSIDs with special characters
+    nmcli -t -f SSID device wifi list | grep -v "^$" | sort -u | while IFS= read -r line; do
+        printf '%s\n' "$line"
+    done
 }
 
 # Function to show saved connections
 show_saved_connections() {
     echo -e "${GREEN}Saved WiFi Connections:${NC}"
     echo "----------------------------------------"
-    # Look for both "wifi" and "802-11-wireless" type connections
-    saved_connections=$(nmcli -t -f NAME,TYPE connection show | grep -E "(wifi|802-11-wireless)" | cut -d: -f1)
-    if [ -z "$saved_connections" ]; then
+    # Look for both "wifi" and "802-11-wireless" type connections using readarray
+    readarray -t saved_connections < <(nmcli -t -f NAME,TYPE connection show | grep -E "(wifi|802-11-wireless)" | cut -d: -f1)
+    if [ ${#saved_connections[@]} -eq 0 ]; then
         echo "No saved WiFi connections found."
     else
-        echo "$saved_connections" | nl -w2 -s'. '
+        for i in "${!saved_connections[@]}"; do
+            printf "%2d. %s\n" $((i+1)) "${saved_connections[$i]}"
+        done
     fi
     echo "----------------------------------------"
 }
@@ -80,8 +103,9 @@ connect_to_network() {
     # Display networks with details and numbers
     for i in "${!networks[@]}"; do
         ssid="${networks[$i]}"
-        # Get signal and security info for this SSID
-        info=$(nmcli -t -f SSID,SIGNAL,SECURITY device wifi list | grep "^${ssid}:" | head -1)
+        # Get signal and security info for this SSID (escape special regex characters)
+        escaped_ssid=$(escape_ssid "$ssid")
+        info=$(nmcli -t -f SSID,SIGNAL,SECURITY device wifi list | grep "^${escaped_ssid}:" | head -1)
         if [ -n "$info" ]; then
             signal=$(echo "$info" | cut -d: -f2)
             security=$(echo "$info" | cut -d: -f3)
@@ -113,7 +137,7 @@ connect_to_network() {
     # Check if connection already exists
     if nmcli connection show "$ssid" &>/dev/null; then
         echo -e "${YELLOW}Connection profile exists. Attempting to connect...${NC}"
-        
+
         # Try to connect first
         if nmcli connection up "$ssid" 2>/dev/null; then
             echo -e "${GREEN}Successfully connected to $ssid${NC}"
@@ -122,7 +146,7 @@ connect_to_network() {
             echo -e "${YELLOW}Connection failed. Network may need password or password update.${NC}"
             read -s -p "Enter password: " password
             echo
-            
+
             if [ -n "$password" ]; then
                 # Update the connection with new password and connect
                 if nmcli connection modify "$ssid" wifi-sec.psk "$password" && nmcli connection up "$ssid"; then
@@ -160,8 +184,9 @@ connect_to_network() {
 
 # Function to disconnect from current network
 disconnect_network() {
-    active_connections=($(nmcli -t -f NAME connection show --active | grep -v lo))
-    
+    # Use readarray to properly handle connection names with spaces
+    readarray -t active_connections < <(nmcli -t -f NAME connection show --active | grep -v "^lo$")
+
     if [ ${#active_connections[@]} -eq 0 ]; then
         echo -e "${YELLOW}No active connections found.${NC}"
         return 0
@@ -200,8 +225,9 @@ disconnect_network() {
 
 # Function to remove saved connection
 remove_connection() {
-    saved_connections=($(nmcli -t -f NAME,TYPE connection show | grep -E "(wifi|802-11-wireless)" | cut -d: -f1))
-    
+    # Use readarray to properly handle connection names with spaces
+    readarray -t saved_connections < <(nmcli -t -f NAME,TYPE connection show | grep -E "(wifi|802-11-wireless)" | cut -d: -f1)
+
     if [ ${#saved_connections[@]} -eq 0 ]; then
         echo -e "${YELLOW}No saved WiFi connections found.${NC}"
         return 0
